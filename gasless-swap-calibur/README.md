@@ -18,17 +18,17 @@ No bundler. No paymaster. No permit. Works with any ERC-20.
 
 ### Who pays what
 
-| Fee component         | Paid by  | How                                        |
-| --------------------- | -------- | ------------------------------------------ |
-| Origin chain gas      | Sponsor  | Relayer submits the tx via `POST /execute`  |
-| Relay fees            | Sponsor  | `subsidizeFees: true` in execution options  |
+| Fee component    | Paid by | How                                                                                   |
+| ---------------- | ------- | ------------------------------------------------------------------------------------- |
+| Origin chain gas | Sponsor | Relayer submits the tx via `POST /execute`, `subsidizeFees: true` in executionOptions |
+| Relay fees       | Sponsor | `subsidizeFees: true` in quote parameters                                             |
 
 ### When to use this
 
 - Your app **controls the user's wallet** (embedded wallets, custodial, etc.)
 - You want gasless swaps that work with **any ERC-20 token**
 - You don't want to set up ERC-4337 infrastructure (bundlers, paymasters)
-- You're willing to sponsor gas for your users
+- You're willing to sponsor gas for your users (temporarily then recouped via app fees or fully)
 
 If the user brings their own external wallet (MetaMask, Rainbow), they can't delegate via 7702 without the wallet's cooperation — consider permit-based flows instead.
 
@@ -54,7 +54,7 @@ App (controls user's private key)
     │
     │  4. POST /execute → sponsor submits the batched tx
     │     → Target is the USER'S EOA (which runs Calibur's code via 7702)
-    │     → subsidizeFees: true → sponsor pays all relay fees
+    │     → subsidizeFees: true → sponsor pays origin tx fees
     │
     ▼
 User receives output tokens, paid nothing
@@ -112,21 +112,19 @@ RELAY_API_KEY=your-key USER_PRIVATE_KEY=0x... npm run demo
 | ------------------ | ------------- | ---------------------------------------------------- |
 | `RELAY_API_KEY`    | Yes           | API key with `sponsoringWalletAddress` configured    |
 | `USER_PRIVATE_KEY` | For execution | User's EOA private key (test wallets only!)          |
+| `REFERRER`         | Yes           | Referrer that matches the API key                    |
 | `CALIBUR_ADDRESS`  | No            | Override Calibur address (default: `0x0000...f00`)   |
-| `INPUT_TOKEN`      | No            | Token to swap from (default: USDC on Base)           |
-| `OUTPUT_TOKEN`     | No            | Token to swap to (default: native ETH)               |
-| `SWAP_AMOUNT`      | No            | Amount in human units (default: `1`)                 |
-| `DRY_RUN`          | No            | Set to `true` to skip execution                     |
+| `DRY_RUN`          | No            | Set to `true` to skip execution                      |
 | `RELAY_API_URL`    | No            | Override API URL (default: `https://api.relay.link`) |
 
 ## Comparison with other approaches
 
-| Approach | Token coverage | Infrastructure needed | Complexity |
-| --- | --- | --- | --- |
-| **Calibur + /execute** (this example) | Any ERC-20 | None (just Relay API key) | Low |
-| Permit + /quote | Only permit-compatible tokens | None | Low |
-| ERC-4337 + paymaster | Any ERC-20 | Bundler, paymaster, smart account | High |
-| ERC-4337 + Relay /execute | Any ERC-20 | Smart account provider | Medium |
+| Approach                              | Token coverage                | Infrastructure needed                      | Complexity |
+| ------------------------------------- | ----------------------------- | ------------------------------------------ | ---------- |
+| **Calibur + /execute** (this example) | Any ERC-20                    | None (just Relay API key, fee sponsorship) | Low        |
+| Permit + /quote                       | Only permit-compatible tokens | None                                       | Low        |
+| ERC-4337 + paymaster                  | Any ERC-20                    | Bundler, paymaster, smart account          | High       |
+| ERC-4337 + Relay /execute             | Any ERC-20                    | Smart account provider                     | Medium     |
 
 ## Related examples
 
