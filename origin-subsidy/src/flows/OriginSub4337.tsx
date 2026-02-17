@@ -4,122 +4,96 @@ import {
   type Address,
   type Hex,
   encodeFunctionData,
-  encodePacked,
-  hashTypedData,
-  recoverAddress,
-  isAddress,
+  encodeAbiParameters,
+  keccak256,
 } from "viem";
 import { StepLogger, type LogEntry } from "../components/StepLogger";
 import { StatusDisplay } from "../components/StatusDisplay";
 import { getQuote, execute, type RelayStatusResponse } from "../relay/api";
-import { BASE_USDC, NATIVE_CURRENCY, CHAIN_IDS } from "../config/constants";
+import {
+  BASE_USDC,
+  NATIVE_CURRENCY,
+  CHAIN_IDS,
+  CALIBUR_ADDRESS,
+} from "../config/constants";
 import { DESTINATION_CHAINS } from "../config/chains";
 import { pollStatus } from "../relay/status-poller";
 
-// ---------- Safe constants ----------
+// ---------- Calibur ABI ----------
 
-// MultiSendCallOnly v1.3.0 on Base
-const MULTI_SEND = "0xA1dabEF33b3B82c7814B6D82A79e50F4AC44102B" as const;
-
-const ZERO_ADDR = "0x0000000000000000000000000000000000000000" as const;
-
-// Safe ABI fragments
-const safeAbi = [
+const caliburAbi = [
   {
-    name: "nonce",
+    name: "execute",
     type: "function",
-    inputs: [],
-    outputs: [{ type: "uint256" }],
-    stateMutability: "view",
-  },
-  {
-    name: "getThreshold",
-    type: "function",
-    inputs: [],
-    outputs: [{ type: "uint256" }],
-    stateMutability: "view",
-  },
-  {
-    name: "getOwners",
-    type: "function",
-    inputs: [],
-    outputs: [{ type: "address[]" }],
-    stateMutability: "view",
-  },
-  {
-    name: "execTransaction",
-    type: "function",
-    stateMutability: "payable",
     inputs: [
-      { name: "to", type: "address" },
-      { name: "value", type: "uint256" },
-      { name: "data", type: "bytes" },
-      { name: "operation", type: "uint8" },
-      { name: "safeTxGas", type: "uint256" },
-      { name: "baseGas", type: "uint256" },
-      { name: "gasPrice", type: "uint256" },
-      { name: "gasToken", type: "address" },
-      { name: "refundReceiver", type: "address" },
-      { name: "signatures", type: "bytes" },
+      {
+        name: "signedBatchedCall",
+        type: "tuple",
+        components: [
+          {
+            name: "batchedCall",
+            type: "tuple",
+            components: [
+              {
+                name: "calls",
+                type: "tuple[]",
+                components: [
+                  { name: "to", type: "address" },
+                  { name: "value", type: "uint256" },
+                  { name: "data", type: "bytes" },
+                ],
+              },
+              { name: "revertOnFailure", type: "bool" },
+            ],
+          },
+          { name: "nonce", type: "uint256" },
+          { name: "keyHash", type: "bytes32" },
+          { name: "executor", type: "address" },
+          { name: "deadline", type: "uint256" },
+        ],
+      },
+      { name: "wrappedSignature", type: "bytes" },
     ],
-    outputs: [{ name: "success", type: "bool" }],
-  },
-] as const;
-
-const multiSendAbi = [
-  {
-    name: "multiSend",
-    type: "function",
-    inputs: [{ name: "transactions", type: "bytes" }],
     outputs: [],
-    stateMutability: "payable",
+  },
+  {
+    name: "nonceSequenceNumber",
+    type: "function",
+    inputs: [{ name: "", type: "uint192" }],
+    outputs: [{ type: "uint64" }],
+    stateMutability: "view",
   },
 ] as const;
 
-// EIP-712 types for Safe transaction signing
-const safeTxTypes = {
-  SafeTx: [
+// EIP-712 types matching Calibur's SignedBatchedCall
+const signedBatchedCallTypes = {
+  Call: [
     { name: "to", type: "address" },
     { name: "value", type: "uint256" },
     { name: "data", type: "bytes" },
-    { name: "operation", type: "uint8" },
-    { name: "safeTxGas", type: "uint256" },
-    { name: "baseGas", type: "uint256" },
-    { name: "gasPrice", type: "uint256" },
-    { name: "gasToken", type: "address" },
-    { name: "refundReceiver", type: "address" },
+  ],
+  BatchedCall: [
+    { name: "calls", type: "Call[]" },
+    { name: "revertOnFailure", type: "bool" },
+  ],
+  SignedBatchedCall: [
+    { name: "batchedCall", type: "BatchedCall" },
     { name: "nonce", type: "uint256" },
+    { name: "keyHash", type: "bytes32" },
+    { name: "executor", type: "address" },
+    { name: "deadline", type: "uint256" },
   ],
 } as const;
 
-// ---------- Helpers ----------
+// EIP-7702 delegation prefix: 0xef0100 + delegate address
+const DELEGATION_PREFIX = "0xef0100";
 
-interface MetaTransaction {
-  to: Address;
-  value: bigint;
-  data: Hex;
-  operation: 0 | 1;
-}
+// Calibur EIP-712 domain salt = bytes32(uint256(uint160(caliburAddress)))
+const CALIBUR_SALT =
+  "0x000000000000000000000000000000009b1d0af20d8c6d0a44e162d11f9b8f00" as Hex;
 
-/** Encode transactions into MultiSend packed bytes */
-function encodeMultiSendData(txs: MetaTransaction[]): Hex {
-  const parts: Hex[] = [];
-  for (const tx of txs) {
-    const dataBytes = tx.data === "0x" ? "0x" : tx.data;
-    const dataLength = BigInt(
-      dataBytes === "0x" ? 0 : (dataBytes.length - 2) / 2,
-    );
-    parts.push(
-      encodePacked(
-        ["uint8", "address", "uint256", "uint256", "bytes"],
-        [tx.operation, tx.to, tx.value, dataLength, dataBytes],
-      ),
-    );
-  }
-  return parts.reduce((acc, part, i) =>
-    i === 0 ? part : (`${acc}${part.slice(2)}` as Hex),
-  );
-}
+const ZERO_ADDRESS =
+  "0x0000000000000000000000000000000000000000" as Address;
 
 // ---------- UI ----------
 
@@ -128,21 +102,18 @@ const CURRENCY_OPTIONS = [
   { value: BASE_USDC, label: "USDC (Base)" },
 ];
 
+type DelegationStatus =
+  | "checking"
+  | "not_delegated"
+  | "delegated"
+  | "wrong_delegation";
+
 export function OriginSub4337() {
-  // Connected wallet = the Safe OWNER (EOA like MetaMask)
-  const { address: ownerAddress, isConnected } = useAccount();
+  const { address, isConnected } = useAccount();
   const { data: walletClient } = useWalletClient();
   const publicClient = usePublicClient();
 
-  // Safe address entered by user
-  const [safeAddress, setSafeAddress] = useState("");
-  const [safeValid, setSafeValid] = useState<boolean | null>(null);
-  const [safeInfo, setSafeInfo] = useState<{
-    threshold: bigint;
-    owners: Address[];
-    isOwner: boolean;
-  } | null>(null);
-
+  const [delegation, setDelegation] = useState<DelegationStatus>("checking");
   const [destChainId, setDestChainId] = useState<number>(CHAIN_IDS.arbitrum);
   const [originCurrency, setOriginCurrency] = useState(NATIVE_CURRENCY);
   const [destCurrency, setDestCurrency] = useState(NATIVE_CURRENCY);
@@ -163,76 +134,88 @@ export function OriginSub4337() {
     [],
   );
 
-  // Validate Safe address when it changes
+  // Check if EOA is already delegated to Calibur
   useEffect(() => {
-    if (!safeAddress || !isAddress(safeAddress) || !publicClient || !ownerAddress) {
-      setSafeValid(null);
-      setSafeInfo(null);
+    if (!address || !publicClient) {
+      setDelegation("checking");
       return;
     }
 
     let cancelled = false;
-    const addr = safeAddress as Address;
-
     (async () => {
-      try {
-        const [threshold, owners] = await Promise.all([
-          publicClient.readContract({
-            address: addr,
-            abi: safeAbi,
-            functionName: "getThreshold",
-          }),
-          publicClient.readContract({
-            address: addr,
-            abi: safeAbi,
-            functionName: "getOwners",
-          }),
-        ]);
-        if (cancelled) return;
+      const code = await publicClient.getCode({ address });
+      if (cancelled) return;
 
-        const isOwner = (owners as Address[]).some(
-          (o) => o.toLowerCase() === ownerAddress.toLowerCase(),
-        );
-        setSafeValid(true);
-        setSafeInfo({
-          threshold: threshold as bigint,
-          owners: owners as Address[],
-          isOwner,
-        });
-      } catch {
-        if (!cancelled) {
-          setSafeValid(false);
-          setSafeInfo(null);
-        }
+      if (!code || code === "0x") {
+        setDelegation("not_delegated");
+        return;
+      }
+
+      // EIP-7702 delegation code = 0xef0100 + 20-byte address
+      const expectedCode = `${DELEGATION_PREFIX}${CALIBUR_ADDRESS.slice(2).toLowerCase()}`;
+      if (code.toLowerCase() === expectedCode.toLowerCase()) {
+        setDelegation("delegated");
+      } else {
+        setDelegation("wrong_delegation");
       }
     })();
 
     return () => {
       cancelled = true;
     };
-  }, [safeAddress, publicClient, ownerAddress]);
+  }, [address, publicClient]);
 
   const runFlow = useCallback(async () => {
-    if (!ownerAddress || !walletClient || !publicClient || !safeInfo?.isOwner)
-      return;
-
-    const safe = safeAddress as Address;
+    if (!address || !walletClient || !publicClient) return;
 
     setRunning(true);
     setLogs([]);
     setFinalStatus(null);
 
     try {
-      log(`Safe: ${safe}`, "success");
-      log(
-        `Owner (signer): ${ownerAddress} — threshold: ${safeInfo.threshold}`,
-        "success",
-      );
+      log(`EOA: ${address}`);
 
-      // ── Step 1: Get quote from Relay (user = Safe address) ──
+      // ── Step 1: Handle EIP-7702 delegation ──
+      let authorizationList: unknown[] | undefined;
+
+      if (delegation !== "delegated") {
+        log("EOA not yet delegated — attempting EIP-7702 authorization...", "pending");
+
+        try {
+          // Try standalone signAuthorization (works with Porto and compatible wallets)
+          const authorization = await (walletClient as any).signAuthorization({
+            contractAddress: CALIBUR_ADDRESS,
+          });
+
+          log("EIP-7702 authorization signed (standalone)", "success");
+
+          authorizationList = [
+            {
+              chainId: authorization.chainId,
+              address: authorization.contractAddress,
+              nonce: authorization.nonce,
+              yParity: authorization.yParity,
+              r: authorization.r,
+              s: authorization.s,
+            },
+          ];
+        } catch (signAuthErr: any) {
+          // JSON-RPC wallets (MetaMask, etc.) don't support standalone
+          // signAuthorization. EIP-7702 requires a wallet with native support
+          // like Porto (Ithaca).
+          throw new Error(
+            "Your wallet doesn't support EIP-7702 signAuthorization. " +
+            "Please connect with Porto (ithaca.xyz/porto) to use the gasless delegation flow."
+          );
+        }
+      } else {
+        log("EOA already delegated to Calibur", "success");
+      }
+
+      // ── Step 2: Get quote from Relay ──
       log("Requesting quote from Relay...");
       const quoteParams = {
-        user: safe,
+        user: address,
         originChainId: CHAIN_IDS.base,
         destinationChainId: destChainId,
         originCurrency,
@@ -245,155 +228,156 @@ export function OriginSub4337() {
       const quote = await getQuote(quoteParams);
       log("Quote received", "success", JSON.stringify(quote, null, 2));
 
-      // ── Step 2: Build inner calls from quote ──
-      const innerCalls: MetaTransaction[] = [];
+      // ── Step 3: Build calls from quote ──
+      const calls: { to: Address; value: bigint; data: Hex }[] = [];
       for (const step of quote.steps ?? []) {
         for (const item of step.items ?? []) {
           if (!item.data?.to) continue;
-          innerCalls.push({
+          calls.push({
             to: item.data.to as Address,
             value: BigInt(item.data.value || "0"),
             data: (item.data.data || "0x") as Hex,
-            operation: 0,
           });
         }
       }
-      if (innerCalls.length === 0) {
+      if (calls.length === 0) {
         throw new Error("No calls found in quote response");
       }
-      log(`Built ${innerCalls.length} inner call(s) from quote`);
+      log(`Built ${calls.length} call(s) from quote`);
 
-      // ── Step 3: Wrap in MultiSend if needed ──
-      let safeTxTo: Address;
-      let safeTxData: Hex;
-      let safeTxValue: bigint;
-      let safeTxOperation: 0 | 1;
+      // ── Step 4: Compute keyHash & read nonce ──
+      // keyHash identifies the signer — for the root EOA key: keccak256(abi.encode(address))
+      const keyHash = keccak256(
+        encodeAbiParameters([{ type: "address" }], [address]),
+      );
+      log(`Key hash: ${keyHash}`);
 
-      if (innerCalls.length === 1) {
-        safeTxTo = innerCalls[0].to;
-        safeTxData = innerCalls[0].data;
-        safeTxValue = innerCalls[0].value;
-        safeTxOperation = 0;
-        log("Single call — no MultiSend needed");
-      } else {
-        const multiSendBytes = encodeMultiSendData(innerCalls);
-        safeTxData = encodeFunctionData({
-          abi: multiSendAbi,
-          functionName: "multiSend",
-          args: [multiSendBytes],
-        });
-        safeTxTo = MULTI_SEND;
-        safeTxValue = 0n;
-        safeTxOperation = 1;
-        log(`Encoded ${innerCalls.length} calls into MultiSend`);
+      // Nonce: key-sequence scheme. Key 0 = root.
+      // If authorizationList is set, EOA isn't delegated yet (delegation happens in same tx) → nonce is 0.
+      // Otherwise, EOA is delegated — read from contract.
+      let currentNonce = 0n;
+      if (!authorizationList) {
+        try {
+          currentNonce = (await publicClient.readContract({
+            address,
+            abi: caliburAbi,
+            functionName: "nonceSequenceNumber",
+            args: [0n],
+          })) as bigint;
+        } catch {
+          // If readContract fails (e.g., just delegated, node not synced), start at 0
+          currentNonce = 0n;
+        }
       }
-
-      // ── Step 4: Read Safe nonce ──
-      const nonce = await publicClient.readContract({
-        address: safe,
-        abi: safeAbi,
-        functionName: "nonce",
-      });
-      log(`Safe nonce: ${nonce}`);
+      log(`Nonce: ${currentNonce}`);
 
       // ── Step 5: Build EIP-712 message ──
-      const safeTxMessage = {
-        to: safeTxTo,
-        value: safeTxValue,
-        data: safeTxData,
-        operation: safeTxOperation,
-        safeTxGas: 0n,
-        baseGas: 0n,
-        gasPrice: 0n,
-        gasToken: ZERO_ADDR,
-        refundReceiver: ZERO_ADDR,
-        nonce,
+      const deadline = BigInt(Math.floor(Date.now() / 1000) + 300); // 5 min
+      log(`Deadline: ${deadline} (${new Date(Number(deadline) * 1000).toISOString()})`);
+
+      // EIP-712 domain — after delegation the EOA IS the verifying contract
+      const domain = {
+        name: "Calibur",
+        version: "1.0.0",
+        chainId: BigInt(CHAIN_IDS.base),
+        verifyingContract: address,
+        salt: CALIBUR_SALT,
       };
 
-      // Safe EIP-712 domain — no name/version
-      const domain = {
-        chainId: BigInt(CHAIN_IDS.base),
-        verifyingContract: safe,
+      const message = {
+        batchedCall: {
+          calls: calls.map((c) => ({
+            to: c.to,
+            value: c.value,
+            data: c.data,
+          })),
+          revertOnFailure: true,
+        },
+        nonce: currentNonce,
+        keyHash,
+        executor: ZERO_ADDRESS, // anyone can submit
+        deadline,
       };
 
       log(
         "EIP-712 message",
         "info",
         JSON.stringify(
-          safeTxMessage,
+          message,
           (_, v) => (typeof v === "bigint" ? v.toString() : v),
           2,
         ),
       );
 
-      // ── Step 6: Owner signs directly via signTypedData ──
-      log("Requesting EIP-712 signature from owner wallet...", "pending");
+      // ── Step 6: Sign batch ──
+      log("Requesting EIP-712 signature...", "pending");
       const signature = await walletClient.signTypedData({
         domain,
-        types: safeTxTypes,
-        primaryType: "SafeTx",
-        message: safeTxMessage,
+        types: signedBatchedCallTypes,
+        primaryType: "SignedBatchedCall",
+        message,
       });
-      log("Signature received", "success", signature);
+      log("Batch signed", "success", signature);
 
-      // Verify signature recovers to the owner
-      const typedDataHash = hashTypedData({
-        domain,
-        types: safeTxTypes,
-        primaryType: "SafeTx",
-        message: safeTxMessage,
-      });
-      const recoveredSigner = await recoverAddress({
-        hash: typedDataHash,
-        signature,
-      });
-      log(`Recovered signer: ${recoveredSigner}`);
-      if (recoveredSigner.toLowerCase() !== ownerAddress.toLowerCase()) {
-        throw new Error(
-          `Signature mismatch! Expected ${ownerAddress}, got ${recoveredSigner}`,
-        );
-      }
-      log("Signer verified as Safe owner", "success");
+      // ── Step 7: Wrap signature (no hooks) ──
+      // Calibur wrappedSignature = abi.encode(signature, hookData)
+      // "0x" for hookData = no hooks
+      const wrappedSignature = encodeAbiParameters(
+        [{ type: "bytes" }, { type: "bytes" }],
+        [signature, "0x"],
+      );
+      log("Wrapped signature", "info", `${wrappedSignature.slice(0, 66)}...`);
 
-      // ── Step 7: Encode execTransaction calldata ──
-      const execTxData = encodeFunctionData({
-        abi: safeAbi,
-        functionName: "execTransaction",
+      // ── Step 8: Encode Calibur execute calldata ──
+      const executeCalldata = encodeFunctionData({
+        abi: caliburAbi,
+        functionName: "execute",
         args: [
-          safeTxMessage.to,
-          safeTxMessage.value,
-          safeTxMessage.data,
-          safeTxMessage.operation,
-          safeTxMessage.safeTxGas,
-          safeTxMessage.baseGas,
-          safeTxMessage.gasPrice,
-          safeTxMessage.gasToken,
-          safeTxMessage.refundReceiver,
-          signature,
+          {
+            batchedCall: {
+              calls: calls.map((c) => ({
+                to: c.to,
+                value: c.value,
+                data: c.data,
+              })),
+              revertOnFailure: true,
+            },
+            nonce: currentNonce,
+            keyHash,
+            executor: ZERO_ADDRESS,
+            deadline,
+          },
+          wrappedSignature,
         ],
       });
-      log("Encoded execTransaction", "info", `${execTxData.slice(0, 66)}...`);
+      log(
+        "Encoded execute calldata",
+        "info",
+        `${executeCalldata.slice(0, 66)}...`,
+      );
 
-      // ── Step 8: Simulate locally ──
-      log("Simulating execTransaction via eth_call...");
-      try {
-        await publicClient.call({
-          to: safe,
-          data: execTxData,
-        });
-        log("Simulation passed", "success");
-      } catch (simErr: any) {
-        const reason =
-          simErr?.shortMessage || simErr?.message || String(simErr);
+      // ── Step 9: Simulate locally ──
+      if (!authorizationList) {
+        log("Simulating execute via eth_call...");
+        try {
+          await publicClient.call({
+            to: address, // The EOA is the contract after delegation
+            data: executeCalldata,
+          });
+          log("Simulation passed", "success");
+        } catch (simErr: any) {
+          const reason =
+            simErr?.shortMessage || simErr?.message || String(simErr);
+          log(`Simulation REVERTED: ${reason}`, "error");
+        }
+      } else {
         log(
-          `Simulation REVERTED: ${reason}`,
-          "error",
-          JSON.stringify(simErr, null, 2),
+          "Skipping simulation — EOA not yet delegated (delegation happens in same tx)",
+          "info",
         );
-        throw new Error(`execTransaction simulation failed: ${reason}`);
       }
 
-      // ── Step 9: Submit to Relay /execute ──
+      // ── Step 10: Submit to Relay /execute ──
       log("Submitting to Relay /execute...");
       const requestId =
         quote.steps?.[0]?.requestId ?? (quote as any).requestId;
@@ -403,9 +387,10 @@ export function OriginSub4337() {
         executionKind: "rawCalls" as const,
         data: {
           chainId: CHAIN_IDS.base,
-          to: safe, // Target the Safe
-          data: execTxData,
+          to: address, // Target the EOA (which runs Calibur's code after delegation)
+          data: executeCalldata,
           value: "0",
+          ...(authorizationList ? { authorizationList } : {}),
         },
         executionOptions: {
           referrer: "relay.link",
@@ -423,7 +408,7 @@ export function OriginSub4337() {
 
       const finalRequestId = execResult.requestId || requestId;
 
-      // ── Step 10: Poll status ──
+      // ── Step 11: Poll status ──
       log(`Polling status for requestId: ${finalRequestId}`, "pending");
       const finalResult = await pollStatus(finalRequestId, (s) => {
         log(`Status update: ${s.status}`, "pending");
@@ -432,6 +417,7 @@ export function OriginSub4337() {
 
       if (finalResult.status === "success") {
         log("Transaction completed successfully!", "success");
+        setDelegation("delegated");
       } else {
         log(
           `Transaction ended with status: ${finalResult.status}`,
@@ -446,11 +432,10 @@ export function OriginSub4337() {
       setRunning(false);
     }
   }, [
-    ownerAddress,
+    address,
     walletClient,
     publicClient,
-    safeAddress,
-    safeInfo,
+    delegation,
     destChainId,
     originCurrency,
     destCurrency,
@@ -461,61 +446,59 @@ export function OriginSub4337() {
   if (!isConnected) {
     return (
       <div className="text-gray-500 text-sm">
-        Connect your owner wallet (MetaMask, etc.) to get started.
+        Connect your wallet to get started.
       </div>
     );
   }
 
-  const canRun =
-    safeValid && safeInfo?.isOwner && walletClient && !running;
+  const canRun = walletClient && !running && delegation !== "checking";
 
   return (
     <div className="space-y-4">
       <div className="bg-gray-900 border border-gray-800 rounded p-4">
         <h2 className="text-lg font-bold text-white mb-1">
-          Safe Gasless Bridge
+          Gasless Bridge (EIP-7702 + Calibur)
         </h2>
         <p className="text-gray-400 text-xs mb-2">
-          Connect your owner wallet, enter your Safe address. You sign one
-          EIP-712 message and Relay handles the tx + origin gas via{" "}
-          <code>/execute</code>.
+          Connect your wallet. On first use, approve a one-time delegation to{" "}
+          <a
+            href="https://github.com/ithacaxyz/calibur"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-blue-400 underline"
+          >
+            Calibur
+          </a>
+          . Then just sign one message per bridge — Relay handles the tx + gas
+          via <code>/execute</code>.
         </p>
 
         <div className="text-xs text-gray-500 space-y-1 mb-3">
           <div>
-            Owner (signer):{" "}
-            <span className="text-gray-300 font-mono">{ownerAddress}</span>
+            EOA:{" "}
+            <span className="text-gray-300 font-mono">{address}</span>
           </div>
-        </div>
-
-        {/* Safe address input */}
-        <div className="mb-3">
-          <label className="block text-xs text-gray-500 mb-1">
-            Safe Address (on Base)
-          </label>
-          <input
-            type="text"
-            value={safeAddress}
-            onChange={(e) => setSafeAddress(e.target.value)}
-            className="w-full bg-gray-800 rounded px-3 py-2 text-sm text-gray-300 border border-gray-700 font-mono"
-            placeholder="0x..."
-          />
-          {safeValid === false && (
-            <div className="text-[10px] text-red-400 mt-1">
-              Not a valid Safe on Base
-            </div>
-          )}
-          {safeValid && safeInfo && !safeInfo.isOwner && (
-            <div className="text-[10px] text-red-400 mt-1">
-              Your connected wallet is not an owner of this Safe
-            </div>
-          )}
-          {safeValid && safeInfo?.isOwner && (
-            <div className="text-[10px] text-green-400 mt-1">
-              Safe verified — threshold: {safeInfo.threshold.toString()},
-              you are an owner
-            </div>
-          )}
+          <div>
+            Delegation:{" "}
+            {delegation === "checking" && (
+              <span className="text-yellow-400">Checking...</span>
+            )}
+            {delegation === "not_delegated" && (
+              <span className="text-yellow-400">
+                Not delegated — will prompt on first run
+              </span>
+            )}
+            {delegation === "delegated" && (
+              <span className="text-green-400">
+                Delegated to Calibur
+              </span>
+            )}
+            {delegation === "wrong_delegation" && (
+              <span className="text-red-400">
+                Delegated to a different contract — re-delegation needed
+              </span>
+            )}
+          </div>
         </div>
 
         <div className="grid grid-cols-2 gap-3 mb-3">
@@ -601,7 +584,11 @@ export function OriginSub4337() {
           disabled={!canRun}
           className="bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 disabled:text-gray-500 text-white px-4 py-2 rounded text-sm font-mono transition-colors"
         >
-          {running ? "Running..." : "Run Gasless Flow"}
+          {running
+            ? "Running..."
+            : delegation === "not_delegated" || delegation === "wrong_delegation"
+              ? "Delegate + Bridge"
+              : "Run Gasless Flow"}
         </button>
       </div>
 

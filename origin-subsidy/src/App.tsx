@@ -10,8 +10,8 @@ export default function App() {
           <div>
             <h1 className="text-xl font-bold">Relay Gasless Bridge</h1>
             <p className="text-xs text-gray-500">
-              Connect owner wallet + enter Safe address. Sign one EIP-712
-              message, Relay handles tx + origin gas.
+              EIP-7702 delegation to Calibur + signed batch execution. Relay
+              handles tx + origin gas via /execute.
             </p>
           </div>
           <ConnectButton />

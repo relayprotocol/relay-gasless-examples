@@ -4,7 +4,6 @@ import {
   metaMaskWallet,
   coinbaseWallet,
   walletConnectWallet,
-  safeWallet,
 } from "@rainbow-me/rainbowkit/wallets";
 import { createConfig, http } from "wagmi";
 import { base, mainnet, optimism, arbitrum } from "wagmi/chains";
@@ -14,12 +13,12 @@ const projectId = "db4ebdffa6043abbcc7483d5d5dc4e02";
 const connectors = connectorsForWallets(
   [
     {
-      groupName: "Smart Wallets",
-      wallets: [safeWallet, coinbaseWallet],
+      groupName: "EIP-7702 Wallets",
+      wallets: [portoWallet as any],
     },
     {
       groupName: "Other Wallets",
-      wallets: [metaMaskWallet, walletConnectWallet],
+      wallets: [metaMaskWallet, coinbaseWallet, walletConnectWallet],
     },
   ],
   {
