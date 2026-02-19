@@ -19,6 +19,8 @@ Step 0: Setup
 
 Step 1: Get quote from Relay
   - POST /quote/v2 to get deposit tx details and a requestId
+  - Pass originGasOverhead (300000 for smart accounts) so Relay
+    accounts for smart account gas overhead during simulation
   - Returns approve + deposit calls for the bridge
 
 Step 2: Build UserOperation
@@ -36,7 +38,9 @@ Step 3: Sign UserOperation
 
 Step 4: Submit to Relay /execute
   - Encode EntryPoint.handleOps([signedUserOp], beneficiary)
-  - POST to /execute with subsidizeFees: true
+  - POST to /execute with executionKind: rawCalls and the
+    requestId from the quote
+  - executionOptions: subsidizeFees: true, referrer: <your-app>
 
 Step 5: Poll for completion
   - GET /intents/status/v3 until the cross-chain bridge completes
@@ -91,6 +95,7 @@ npm run demo
 ```
 
 This will:
+
 1. Auto-fund the smart account with USDC from the owner EOA if needed (requires a small amount of ETH on the owner EOA for the transfer gas)
 2. Deploy the smart account if it doesn't exist yet (included in the UserOp)
 3. Bridge 1 USDC from Base to Arbitrum via Relay
@@ -113,3 +118,4 @@ This will:
 - **SimpleAccountFactory:** `0x91E60e0613810449d098b0b5Ec8b51A0FE8c8985`
 - **Gas trick:** `maxFeePerGas = 0`, `maxPriorityFeePerGas = 0` — Relay covers gas instead of the user or a paymaster
 - **UserOp format:** v0.7 packed — gas values are packed into `bytes32` fields (`accountGasLimits`, `gasFees`)
+- **`originGasOverhead`:** Pass `300000` in the `/quote/v2` request for smart accounts — tells Relay how much additional gas the UserOperation adds over a normal EOA transaction, used during simulation to accurately price the fee.
