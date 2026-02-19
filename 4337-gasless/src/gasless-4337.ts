@@ -202,6 +202,7 @@ async function main() {
     amount: BRIDGE_AMOUNT.toString(),
     tradeType: "EXACT_INPUT",
     recipient: smartAccountAddress,
+    // This is the overhead gas cost of the smart wallet, this will be used when simulating the transaction
     originGasOverhead: "300000",
   };
 
