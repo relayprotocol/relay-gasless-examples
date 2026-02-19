@@ -41,6 +41,8 @@ App (controls user's private key)
     │     → getCode(eoa) — look for 0xef0100 + calibur address
     │
     │  1. POST /quote → get deposit tx details
+    │     → Pass originGasOverhead (80000) so Relay accounts for
+    │       Calibur's execute() overhead during simulation
     │     → Same-chain swap: USDC → ETH on Base
     │
     │  2. Build batched call via Calibur's execute(BatchedCall):
@@ -72,7 +74,7 @@ Because the EOA is delegated to Calibur via 7702, calling `execute(batchedCall)`
 - **Deployed on:** Mainnet, Base, Arbitrum, Optimism, Unichain, BNB
 - **Audited by:** OpenZeppelin, Cantina
 
-The only feature we use here is `execute(BatchedCall)` — batch multiple calls atomically:
+The only feature we use here is signed batch execution via `execute(SignedBatchedCall, wrappedSignature)` — batch multiple calls atomically with an off-chain EIP-712 signature (needed because Relay's relayer is `msg.sender`, not the EOA):
 
 ```solidity
 struct Call {
@@ -125,6 +127,10 @@ RELAY_API_KEY=your-key USER_PRIVATE_KEY=0x... npm run demo
 | Permit + /quote                       | Only permit-compatible tokens | None                                       | Low        |
 | ERC-4337 + paymaster                  | Any ERC-20                    | Bundler, paymaster, smart account          | High       |
 | ERC-4337 + Relay /execute             | Any ERC-20                    | Smart account provider                     | Medium     |
+
+### Key technical details
+
+- **`originGasOverhead`:** Pass `80000` in the `/quote` request — tells Relay how much additional gas the Calibur `execute()` wrapper adds over the raw inner calls (EIP-712 signature verification, batch dispatch, nonce check). Lower than the 4337 example's `300000` because there's no EntryPoint or UserOp validation overhead.
 
 ## Related examples
 

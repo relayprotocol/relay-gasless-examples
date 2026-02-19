@@ -97,6 +97,10 @@ async function main() {
     amount: parseUnits(SWAP_AMOUNT, INPUT_DECIMALS).toString(),
     tradeType: "EXACT_INPUT",
     recipient: userAddress,
+    // Extra gas for Calibur's execute() wrapper (EIP-712 verification + batch
+    // dispatch + optional 7702 authorization). Relay's built-in gas buffers
+    // cover most of the origin cost; this just accounts for the contract overhead.
+    originGasOverhead: "80000",
     //Enable this to completely sponsor destination execution
     subsidizeFees: false,
     //Enable this to recoup the origin gas fee
